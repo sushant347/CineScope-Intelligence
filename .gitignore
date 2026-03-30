@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# Virtual environments
+.venv/
+venv/
+backend/.venv/
+
+# Django
+backend/db.sqlite3
+backend/*.sqlite3
+backend/staticfiles/
+
+# ML artifacts and datasets
+ml/data/*.csv
+ml/models/*.pkl
+ml/models/*.joblib
+ml/models/bert_sentiment/
+
+# Node / frontend
+frontend/node_modules/
+frontend/dist/
+
+# IDE and OS
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Local-only documentation and automation
+project.md
+deployment.md
+scripts/
