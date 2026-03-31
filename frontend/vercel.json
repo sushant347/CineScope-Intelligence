@@ -2,7 +2,7 @@
   "rewrites": [
     {
       "source": "/api/(.*)",
-      "destination": "https://cinescope-api.onrender.com/api/$1"
+      "destination": "https://cinescope-api-wgmr.onrender.com/api/$1"
     },
     {
       "source": "/(.*)",
