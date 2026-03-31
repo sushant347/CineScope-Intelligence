@@ -33,7 +33,7 @@ services:
       - key: HF_BERT_WAIT_FOR_MODEL
         value: "False"
       - key: ENABLE_SVM_RUNTIME_BOOTSTRAP
-        value: "False"
+        value: "True"
       - key: DJANGO_SECURE_SSL_REDIRECT
         value: "True"
       - key: DJANGO_SECURE_HSTS_SECONDS

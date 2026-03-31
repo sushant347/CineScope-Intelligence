@@ -229,10 +229,15 @@ class MLService:
                          "API will work in demo mode.")
 
         svm_path = os.path.join(model_dir, 'svm_model.pkl')
+        svm_vec_path = os.path.join(model_dir, 'svm_vectorizer.pkl')
         if os.path.exists(svm_path):
             try:
                 self.svm_model = joblib.load(svm_path)
-                self.svm_vectorizer = self.vectorizer
+                # Load dedicated SVM vectorizer if it exists, otherwise use shared vectorizer
+                if os.path.exists(svm_vec_path):
+                    self.svm_vectorizer = joblib.load(svm_vec_path)
+                else:
+                    self.svm_vectorizer = self.vectorizer
                 self.svm_model_loaded = True
                 logger.info("SVM model loaded successfully")
             except Exception as exc:
@@ -414,7 +419,7 @@ class MLService:
         if cached_result is not None:
             return cached_result
 
-        endpoint = f'https://api-inference.huggingface.co/models/{self.remote_bert_model_id}'
+        endpoint = f'https://router.huggingface.co/models/{self.remote_bert_model_id}'
         payload = json.dumps({
             'inputs': text[:3000],
             'parameters': {'top_k': None},
