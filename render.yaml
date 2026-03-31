@@ -17,19 +17,6 @@ services:
       - key: ALLOWED_HOSTS
         value: your-api.onrender.com
       - key: CORS_ALLOWED_ORIGINS
-        value: https://your-frontend.onrender.com
+        value: https://your-frontend.vercel.app
       - key: CSRF_TRUSTED_ORIGINS
-        value: https://your-frontend.onrender.com
-
-  - type: static_site
-    name: cinescope-frontend
-    rootDir: frontend
-    buildCommand: npm install && npm run build
-    staticPublishPath: dist
-    envVars:
-      - key: VITE_API_BASE_URL
-        value: https://your-api.onrender.com/api
-    routes:
-      - type: rewrite
-        source: /*
-        destination: /index.html
+        value: https://your-frontend.vercel.app
