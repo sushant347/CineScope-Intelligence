@@ -8,6 +8,8 @@ services:
     startCommand: gunicorn config.wsgi:application --log-file -
     healthCheckPath: /api/health/
     envVars:
+      - key: PYTHON_VERSION
+        value: "3.12.9"
       - key: DJANGO_SECRET_KEY
         generateValue: true
       - key: DJANGO_DEBUG
