@@ -651,6 +651,11 @@ a {
   background: #f8e2df;
 }
 
+.sentiment-pill.mixed {
+  color: #855f13;
+  background: #f6edda;
+}
+
 .confidence-row {
   margin-top: 0.75rem;
   display: grid;
@@ -682,6 +687,10 @@ a {
 
 .progress-fill.neutral {
   background: linear-gradient(90deg, #8f969e, #747d86);
+}
+
+.progress-fill.mixed {
+  background: linear-gradient(90deg, #c48a1e, #9f7118);
 }
 
 .probability-grid {
@@ -716,6 +725,52 @@ a {
 .probability-card.negative {
   border-color: #ebc7c3;
   background: #f9ecea;
+}
+
+.fusion-score-row {
+  margin-top: 0.75rem;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.55rem 0.65rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid #e1dbc9;
+  background: #fff9ef;
+}
+
+.fusion-score-row span {
+  font-size: 0.8rem;
+  color: var(--ink-soft);
+}
+
+.fusion-score-row strong {
+  font-size: 1.06rem;
+}
+
+.keyword-row {
+  margin-top: 0.65rem;
+  display: grid;
+  gap: 0.45rem;
+}
+
+.keyword-row > span {
+  font-size: 0.8rem;
+  color: var(--ink-soft);
+}
+
+.keyword-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.42rem;
+}
+
+.keyword-chip {
+  border-radius: 999px;
+  padding: 0.24rem 0.58rem;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: #805a12;
+  background: #faedd2;
 }
 
 .token-stream {
@@ -803,7 +858,9 @@ a {
 }
 
 .status-positive,
-.status-negative {
+.status-negative,
+.status-mixed,
+.status-neutral {
   width: fit-content;
   border-radius: 999px;
   font-size: 0.74rem;
@@ -820,6 +877,16 @@ a {
 .status-negative {
   background: #f7e4e1;
   color: var(--negative);
+}
+
+.status-mixed {
+  background: #f7edd6;
+  color: #815b14;
+}
+
+.status-neutral {
+  background: #ece8df;
+  color: #626b74;
 }
 
 .history-shell {

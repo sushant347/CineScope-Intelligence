@@ -54,16 +54,28 @@ const MODES = [
 
 const formatPercent = (value) => `${((value || 0) * 100).toFixed(1)}%`;
 
+const normalizeSentiment = (value) => {
+  const sentiment = String(value || '').toLowerCase();
+  if (['positive', 'negative', 'mixed', 'neutral'].includes(sentiment)) {
+    return sentiment;
+  }
+  return 'neutral';
+};
+
+const statusClassName = (value) => `status-${normalizeSentiment(value)}`;
+
 const MODEL_LABELS = {
   logistic_regression: 'Logistic Regression',
   svm: 'SVM',
   bert: 'BERT',
+  bert_vader: 'BERT + VADER Fusion',
 };
 
 const INFERENCE_MODELS = [
   { id: 'logistic_regression', label: 'Logistic Regression (fast default)' },
   { id: 'svm', label: 'SVM (classical alternative)' },
   { id: 'bert', label: 'BERT (best contextual model when available)' },
+  { id: 'bert_vader', label: 'BERT + VADER fusion (pos/neg/mixed + score + keywords)' },
 ];
 
 const parseCsvLine = (line) => {
@@ -127,6 +139,7 @@ function AnalyzerPage() {
   );
 
   const sentiment = result?.sentiment || result?.overall?.sentiment || 'neutral';
+  const sentimentTone = normalizeSentiment(sentiment);
   const confidence = result?.confidence ?? result?.overall?.confidence ?? 0;
   const positiveProb = result?.positive_prob ?? result?.overall?.positive_prob ?? 0;
   const negativeProb = result?.negative_prob ?? result?.overall?.negative_prob ?? 0;
@@ -373,7 +386,7 @@ function AnalyzerPage() {
                     <h2>Prediction Summary</h2>
                     <p>{activeMode.helper}</p>
                   </div>
-                  <span className={`sentiment-pill ${sentiment}`}>{sentiment}</span>
+                  <span className={`sentiment-pill ${sentimentTone}`}>{sentiment}</span>
                 </div>
 
                 {result.model_used && (
@@ -398,7 +411,7 @@ function AnalyzerPage() {
                   </div>
                   <div className="progress-track">
                     <div
-                      className={`progress-fill ${sentiment}`}
+                      className={`progress-fill ${sentimentTone}`}
                       style={{ width: `${Math.max(confidence * 100, 3)}%` }}
                     />
                   </div>
@@ -414,6 +427,24 @@ function AnalyzerPage() {
                     <strong>{formatPercent(negativeProb)}</strong>
                   </div>
                 </div>
+
+                {typeof result.score === 'number' && (
+                  <div className="fusion-score-row">
+                    <span>Composite Score</span>
+                    <strong>{result.score.toFixed(2)}</strong>
+                  </div>
+                )}
+
+                {Array.isArray(result.keywords) && result.keywords.length > 0 && (
+                  <div className="keyword-row">
+                    <span>Keywords</span>
+                    <div className="keyword-chips">
+                      {result.keywords.map((keyword) => (
+                        <span key={keyword} className="keyword-chip">{keyword}</span>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </article>
 
               {result.mode === 'explain' && (
@@ -487,10 +518,10 @@ function AnalyzerPage() {
                           <strong>{MODEL_LABELS[modelName] || modelName}</strong>
                           {!modelResult.available && <span className="tag-muted">Fallback</span>}
                         </div>
-                        <span className={`sentiment-pill ${modelResult.sentiment}`}>{modelResult.sentiment}</span>
+                        <span className={`sentiment-pill ${normalizeSentiment(modelResult.sentiment)}`}>{modelResult.sentiment}</span>
                         <div className="progress-track">
                           <div
-                            className={`progress-fill ${modelResult.sentiment}`}
+                            className={`progress-fill ${normalizeSentiment(modelResult.sentiment)}`}
                             style={{ width: `${Math.max((modelResult.confidence || 0) * 100, 3)}%` }}
                           />
                         </div>
@@ -623,7 +654,7 @@ function AnalyzerPage() {
                         <td>{item.index + 1}</td>
                         <td>{item.review}</td>
                         <td>
-                          <span className={item.sentiment === 'positive' ? 'status-positive' : 'status-negative'}>
+                          <span className={statusClassName(item.sentiment)}>
                             {item.sentiment}
                           </span>
                         </td>

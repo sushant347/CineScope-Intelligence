@@ -58,7 +58,7 @@ class PredictView(APIView):
     
     Predict sentiment of a movie review.
     
-    Input: {"review": "This movie is amazing", "model": "logistic_regression|svm|bert"}
+    Input: {"review": "This movie is amazing", "model": "logistic_regression|svm|bert|bert_vader"}
     Output: {"sentiment": "positive", "confidence": 0.94, ...}
     """
     permission_classes = [permissions.AllowAny]
@@ -555,8 +555,15 @@ def _model_catalog():
             'id': 'bert',
             'name': 'BERT Fine-Tuned',
             'family': 'Transformer',
-            'status': 'active' if ml_service.bert_model_loaded else 'runtime-optional',
+            'status': 'active' if (ml_service.bert_model_loaded or ml_service.remote_bert_enabled) else 'runtime-optional',
             'reported_accuracy': 0.86,
+        },
+        {
+            'id': 'bert_vader',
+            'name': 'BERT + VADER Fusion',
+            'family': 'Hybrid Ensemble',
+            'status': 'active' if ml_service.vader_analyzer else 'runtime-optional',
+            'reported_accuracy': 0.89,
         },
     ]
 

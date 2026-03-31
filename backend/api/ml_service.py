@@ -6,9 +6,13 @@ Singleton service that loads ML models once and provides prediction methods.
 
 import os
 import re
+import json
 import numpy as np
 import joblib
 import logging
+import urllib.error
+import urllib.request
+from collections import Counter
 from django.conf import settings
 from sklearn.metrics.pairwise import cosine_similarity
 
@@ -34,7 +38,7 @@ NLTK_RESOURCES = [
     ('taggers/averaged_perceptron_tagger', 'averaged_perceptron_tagger'),
 ]
 
-NLTK_OPTIONAL_DOWNLOADS = ['punkt_tab', 'averaged_perceptron_tagger_eng']
+NLTK_OPTIONAL_DOWNLOADS = ['punkt_tab', 'averaged_perceptron_tagger_eng', 'vader_lexicon']
 
 # Common movie-related aspects
 MOVIE_ASPECTS = {
@@ -50,7 +54,8 @@ MOVIE_ASPECTS = {
     'movie', 'film', 'show', 'series',
 }
 
-SUPPORTED_PREDICTION_MODELS = {'logistic_regression', 'svm', 'bert'}
+SUPPORTED_PREDICTION_MODELS = {'logistic_regression', 'svm', 'bert', 'bert_vader'}
+DEFAULT_REMOTE_BERT_MODEL = 'distilbert-base-uncased-finetuned-sst-2-english'
 
 
 class MLService:
@@ -70,13 +75,19 @@ class MLService:
         self._initialized = True
         self.model = None
         self.svm_model = None
+        self.svm_vectorizer = None
+        self.svm_bootstrap_source = None
         self.vectorizer = None
         self.bert_pipeline = None
+        self.vader_analyzer = None
         self.model_loaded = False
         self.svm_model_loaded = False
         self.bert_model_loaded = False
         self._models_checked = False
         self._optional_models_checked = False
+        self.remote_bert_model_id = os.environ.get('HF_BERT_MODEL_ID', DEFAULT_REMOTE_BERT_MODEL).strip()
+        self.remote_bert_token = os.environ.get('HF_API_TOKEN', '').strip()
+        self.remote_bert_enabled = bool(self.remote_bert_model_id)
         self.stop_words = set(DEFAULT_STOP_WORDS)
         self.lemmatizer = WordNetLemmatizer()
         self.nltk_ready = False
@@ -122,6 +133,13 @@ class MLService:
                 logger.warning("NLTK stopwords unavailable; using minimal fallback stopword set.")
         else:
             logger.warning("Some NLTK resources are unavailable; using fallback tokenization where needed.")
+
+        try:
+            from nltk.sentiment import SentimentIntensityAnalyzer
+
+            self.vader_analyzer = SentimentIntensityAnalyzer()
+        except Exception as exc:
+            logger.warning("VADER sentiment analyzer unavailable; using neutral fallback score: %s", exc)
 
     def _tokenize_words(self, text):
         try:
@@ -176,6 +194,7 @@ class MLService:
         if os.path.exists(svm_path):
             try:
                 self.svm_model = joblib.load(svm_path)
+                self.svm_vectorizer = self.vectorizer
                 self.svm_model_loaded = True
                 logger.info("SVM model loaded successfully")
             except Exception as exc:
@@ -211,6 +230,184 @@ class MLService:
             logger.info("Optional BERT model loaded for comparison")
         except Exception as exc:
             logger.warning("BERT model unavailable for runtime comparison: %s", exc)
+
+    def _bootstrap_svm_model(self):
+        """Train a lightweight SVM model when svm_model.pkl is absent."""
+        if self.svm_model_loaded:
+            return
+
+        if not self._ensure_nltk_resource('corpora/movie_reviews', 'movie_reviews'):
+            logger.warning("SVM bootstrap skipped because NLTK movie_reviews is unavailable")
+            return
+
+        try:
+            from nltk.corpus import movie_reviews
+            from sklearn.calibration import CalibratedClassifierCV
+            from sklearn.feature_extraction.text import TfidfVectorizer
+            from sklearn.svm import LinearSVC
+
+            documents = []
+            labels = []
+            for category in ('pos', 'neg'):
+                for file_id in movie_reviews.fileids(category):
+                    documents.append(movie_reviews.raw(file_id))
+                    labels.append(1 if category == 'pos' else 0)
+
+            if not documents:
+                logger.warning("SVM bootstrap failed: NLTK movie_reviews corpus is empty")
+                return
+
+            vectorizer = TfidfVectorizer(
+                max_features=18000,
+                ngram_range=(1, 2),
+                min_df=2,
+                max_df=0.95,
+                stop_words='english',
+            )
+            tfidf_matrix = vectorizer.fit_transform(documents)
+
+            classifier = LinearSVC(C=1.0)
+            calibrated = CalibratedClassifierCV(classifier, cv=3)
+            calibrated.fit(tfidf_matrix, labels)
+
+            self.svm_model = calibrated
+            self.svm_vectorizer = vectorizer
+            self.svm_model_loaded = True
+            self.svm_bootstrap_source = 'nltk_movie_reviews'
+
+            logger.info("SVM model bootstrapped from NLTK movie_reviews corpus")
+        except Exception as exc:
+            logger.warning("Failed to bootstrap SVM model at runtime: %s", exc)
+
+    def _score_with_vader(self, text):
+        """Return VADER polarity scores with safe fallback."""
+        if not self.vader_analyzer:
+            return {'compound': 0.0, 'pos': 0.0, 'neu': 1.0, 'neg': 0.0}
+
+        try:
+            raw_scores = self.vader_analyzer.polarity_scores(text)
+            return {
+                'compound': round(float(raw_scores.get('compound', 0.0)), 4),
+                'pos': round(float(raw_scores.get('pos', 0.0)), 4),
+                'neu': round(float(raw_scores.get('neu', 1.0)), 4),
+                'neg': round(float(raw_scores.get('neg', 0.0)), 4),
+            }
+        except Exception as exc:
+            logger.warning("VADER scoring failed; falling back to neutral score: %s", exc)
+            return {'compound': 0.0, 'pos': 0.0, 'neu': 1.0, 'neg': 0.0}
+
+    def _extract_keywords(self, text, limit=4):
+        """Extract high-signal adjective/noun keywords from user text."""
+        tokens = []
+        for token in self._tokenize_words(text.lower()):
+            normalized = re.sub(r'[^a-z]', '', token)
+            if len(normalized) < 3 or normalized in self.stop_words:
+                continue
+            tokens.append(normalized)
+
+        if not tokens:
+            return []
+
+        tagged_tokens = self._safe_pos_tag(tokens)
+        preferred = [
+            token
+            for token, tag in tagged_tokens
+            if tag.startswith('JJ') or tag.startswith('NN')
+        ]
+        pool = preferred or tokens
+        return [word for word, _ in Counter(pool).most_common(limit)]
+
+    def _normalize_bert_output(self, output_payload):
+        """Normalize local/remote BERT payload into common probability fields."""
+        labels = output_payload
+        if isinstance(labels, list) and labels and isinstance(labels[0], list):
+            labels = labels[0]
+        if isinstance(labels, dict):
+            labels = [labels]
+        if not isinstance(labels, list):
+            labels = []
+
+        positive_prob = 0.5
+        negative_prob = 0.5
+
+        for item in labels:
+            if not isinstance(item, dict):
+                continue
+            label = str(item.get('label', '')).lower()
+            score = float(item.get('score', 0.0))
+
+            if 'pos' in label or label.endswith('1'):
+                positive_prob = score
+            elif 'neg' in label or label.endswith('0'):
+                negative_prob = score
+
+        # Some hosted responses return only the winning label.
+        if len(labels) == 1 and isinstance(labels[0], dict):
+            label = str(labels[0].get('label', '')).lower()
+            score = float(labels[0].get('score', 0.0))
+            if 'pos' in label or label.endswith('1'):
+                positive_prob = score
+                negative_prob = 1.0 - score
+            elif 'neg' in label or label.endswith('0'):
+                negative_prob = score
+                positive_prob = 1.0 - score
+
+        total = positive_prob + negative_prob
+        if total > 0:
+            positive_prob /= total
+            negative_prob /= total
+
+        sentiment = 'positive' if positive_prob >= negative_prob else 'negative'
+        confidence = max(positive_prob, negative_prob)
+
+        return {
+            'sentiment': sentiment,
+            'confidence': round(float(confidence), 4),
+            'positive_prob': round(float(positive_prob), 4),
+            'negative_prob': round(float(negative_prob), 4),
+        }
+
+    def _predict_with_remote_bert(self, text):
+        """Run BERT inference using Hugging Face hosted inference API."""
+        if not self.remote_bert_enabled:
+            raise RuntimeError('Hosted BERT inference is disabled')
+
+        endpoint = f'https://api-inference.huggingface.co/models/{self.remote_bert_model_id}'
+        payload = json.dumps({
+            'inputs': text[:3000],
+            'parameters': {'top_k': None},
+            'options': {'wait_for_model': True},
+        }).encode('utf-8')
+
+        headers = {'Content-Type': 'application/json'}
+        if self.remote_bert_token:
+            headers['Authorization'] = f'Bearer {self.remote_bert_token}'
+
+        request = urllib.request.Request(
+            endpoint,
+            data=payload,
+            headers=headers,
+            method='POST',
+        )
+
+        try:
+            with urllib.request.urlopen(request, timeout=25) as response:
+                raw_body = response.read().decode('utf-8')
+        except urllib.error.HTTPError as exc:
+            message = exc.read().decode('utf-8', errors='ignore') if hasattr(exc, 'read') else str(exc)
+            raise RuntimeError(f'Hosted BERT HTTP error: {message or exc}') from exc
+        except urllib.error.URLError as exc:
+            raise RuntimeError(f'Hosted BERT connection error: {exc}') from exc
+
+        try:
+            data = json.loads(raw_body)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f'Hosted BERT response parse error: {exc}') from exc
+
+        if isinstance(data, dict) and data.get('error'):
+            raise RuntimeError(str(data['error']))
+
+        return self._normalize_bert_output(data)
     
     def _preprocess_text(self, text):
         """Clean and preprocess text."""
@@ -247,6 +444,81 @@ class MLService:
         
         return self._predict_with_vector_model(text, self.model)
 
+    def predict_with_bert_vader(self, text):
+        """Fuse BERT polarity with VADER score to produce pos/neg/mixed output."""
+        self._load_optional_models()
+
+        bert_result = None
+        bert_fallback = False
+        bert_reason = ''
+
+        try:
+            bert_result = self._predict_with_bert(text)
+        except Exception as exc:
+            bert_fallback = True
+            bert_reason = str(exc)
+            bert_result = self.predict(text)
+
+        vader_result = self._score_with_vader(text)
+        bert_signal = float(bert_result['positive_prob']) - float(bert_result['negative_prob'])
+        vader_signal = float(vader_result['compound'])
+
+        # Weighted blend that favors BERT context while preserving lexical polarity.
+        fused_score = (0.65 * bert_signal) + (0.35 * vader_signal)
+        fused_score = max(min(fused_score, 1.0), -1.0)
+
+        if vader_signal >= 0.05:
+            vader_sentiment = 'positive'
+        elif vader_signal <= -0.05:
+            vader_sentiment = 'negative'
+        else:
+            vader_sentiment = 'neutral'
+
+        bert_sentiment = 'positive' if bert_signal >= 0 else 'negative'
+        disagreement = vader_sentiment != 'neutral' and vader_sentiment != bert_sentiment
+
+        if abs(fused_score) < 0.2 or (disagreement and abs(fused_score) < 0.45):
+            sentiment = 'mixed'
+        elif fused_score >= 0:
+            sentiment = 'positive'
+        else:
+            sentiment = 'negative'
+
+        confidence = 0.52 + (abs(fused_score) * 0.42)
+        if sentiment == 'mixed':
+            confidence -= 0.08
+        confidence = min(0.99, max(0.5, confidence))
+
+        positive_prob = (fused_score + 1.0) / 2.0
+        negative_prob = 1.0 - positive_prob
+
+        response = {
+            'sentiment': sentiment,
+            'score': round(float(fused_score), 4),
+            'confidence': round(float(confidence), 4),
+            'positive_prob': round(float(positive_prob), 4),
+            'negative_prob': round(float(negative_prob), 4),
+            'keywords': self._extract_keywords(text, limit=4),
+            'components': {
+                'bert': {
+                    'sentiment': bert_result.get('sentiment', 'positive'),
+                    'confidence': round(float(bert_result.get('confidence', 0.5)), 4),
+                    'positive_prob': round(float(bert_result.get('positive_prob', 0.5)), 4),
+                    'negative_prob': round(float(bert_result.get('negative_prob', 0.5)), 4),
+                },
+                'vader': {
+                    **vader_result,
+                    'sentiment': vader_sentiment,
+                },
+            },
+        }
+
+        if bert_fallback:
+            response['fallback'] = True
+            response['reason'] = f'BERT unavailable, blended fallback model with VADER: {bert_reason}'
+
+        return response
+
     def predict_with_model(self, text, model_name='logistic_regression'):
         """Predict sentiment using a specific model with safe fallbacks."""
         requested_model = (model_name or 'logistic_regression').lower().strip()
@@ -271,48 +543,73 @@ class MLService:
 
         if requested_model == 'svm':
             self._ensure_models_loaded()
-            if self.model_loaded and self.svm_model_loaded and self.svm_model and self.vectorizer:
-                svm_result = self._predict_with_vector_model(text, self.svm_model)
-                return {
+            if not self.svm_model_loaded:
+                self._bootstrap_svm_model()
+
+            svm_vectorizer = self.svm_vectorizer or self.vectorizer
+            if self.svm_model_loaded and self.svm_model and svm_vectorizer:
+                svm_result = self._predict_with_vector_model(text, self.svm_model, vectorizer=svm_vectorizer)
+                used_bootstrap = bool(self.svm_bootstrap_source)
+                response = {
                     **svm_result,
                     'model_requested': requested_model,
                     'model_used': 'svm',
-                    'fallback': False,
+                    'fallback': used_bootstrap,
                 }
+                if used_bootstrap:
+                    response['reason'] = 'SVM model bootstrapped from NLTK movie_reviews corpus'
+
+                return response
 
             return {
                 **baseline_response,
                 'reason': 'SVM model is not available in current runtime',
             }
 
+        if requested_model == 'bert_vader':
+            try:
+                fusion_result = self.predict_with_bert_vader(text)
+                return {
+                    **fusion_result,
+                    'model_requested': requested_model,
+                    'model_used': 'bert_vader',
+                    'fallback': fusion_result.get('fallback', False),
+                }
+            except Exception as exc:
+                return {
+                    **baseline_response,
+                    'reason': f'BERT + VADER fusion failed: {exc}',
+                }
+
         if requested_model == 'bert':
             self._load_optional_models()
-            if self.bert_model_loaded and self.bert_pipeline:
-                try:
-                    bert_result = self._predict_with_bert(text)
-                    return {
-                        **bert_result,
-                        'model_requested': requested_model,
-                        'model_used': 'bert',
-                        'fallback': False,
-                    }
-                except Exception as exc:
-                    return {
-                        **baseline_response,
-                        'reason': f'BERT inference failed: {exc}',
-                    }
-
-            return {
-                **baseline_response,
-                'reason': 'BERT runtime dependencies/model files are unavailable',
-            }
+            try:
+                bert_result = self._predict_with_bert(text)
+                response = {
+                    **bert_result,
+                    'model_requested': requested_model,
+                    'model_used': 'bert',
+                    'fallback': not self.bert_model_loaded,
+                }
+                if not self.bert_model_loaded:
+                    response['reason'] = f'Using hosted BERT model: {self.remote_bert_model_id}'
+                return response
+            except Exception as exc:
+                return {
+                    **baseline_response,
+                    'reason': f'BERT inference failed: {exc}',
+                }
 
         return baseline_response
 
-    def _predict_with_vector_model(self, text, model):
+    def _predict_with_vector_model(self, text, model, vectorizer=None):
         """Run inference for models that use the shared TF-IDF vectorizer."""
         clean_text = self._preprocess_text(text)
-        text_tfidf = self.vectorizer.transform([clean_text])
+        active_vectorizer = vectorizer or self.vectorizer
+        if active_vectorizer is None:
+            raise RuntimeError('Vectorizer is not available for the selected model')
+
+        text_tfidf = active_vectorizer.transform([clean_text])
 
         prediction = model.predict(text_tfidf)[0]
 
@@ -336,43 +633,20 @@ class MLService:
         }
 
     def _predict_with_bert(self, text):
-        """Run optional BERT inference when transformers runtime is available."""
-        if not self.bert_pipeline:
-            raise RuntimeError('BERT pipeline is not loaded')
+        """Run BERT inference from local artifacts first, then hosted fallback."""
+        if self.bert_pipeline:
+            outputs = self.bert_pipeline(text[:3000])
+            return self._normalize_bert_output(outputs)
 
-        outputs = self.bert_pipeline(text[:3000])
-        labels = outputs[0] if outputs else []
-
-        positive_prob = 0.5
-        negative_prob = 0.5
-        for item in labels:
-            label = str(item.get('label', '')).lower()
-            score = float(item.get('score', 0.0))
-            if 'pos' in label or label.endswith('1'):
-                positive_prob = score
-            elif 'neg' in label or label.endswith('0'):
-                negative_prob = score
-
-        total = positive_prob + negative_prob
-        if total > 0:
-            positive_prob /= total
-            negative_prob /= total
-
-        sentiment = 'positive' if positive_prob >= negative_prob else 'negative'
-        confidence = max(positive_prob, negative_prob)
-
-        return {
-            'sentiment': sentiment,
-            'confidence': round(confidence, 4),
-            'positive_prob': round(positive_prob, 4),
-            'negative_prob': round(negative_prob, 4),
-        }
+        return self._predict_with_remote_bert(text)
 
     def compare_models(self, text):
         """Compare predictions across available LR, SVM, and BERT models."""
         base = self.predict(text)
         self._ensure_models_loaded()
         self._load_optional_models()
+        if not self.svm_model_loaded:
+            self._bootstrap_svm_model()
 
         models = {
             'logistic_regression': {
@@ -382,13 +656,16 @@ class MLService:
             }
         }
 
-        if self.model_loaded and self.svm_model_loaded and self.svm_model and self.vectorizer:
-            svm_prediction = self._predict_with_vector_model(text, self.svm_model)
+        svm_vectorizer = self.svm_vectorizer or self.vectorizer
+        if self.svm_model_loaded and self.svm_model and svm_vectorizer:
+            svm_prediction = self._predict_with_vector_model(text, self.svm_model, vectorizer=svm_vectorizer)
             models['svm'] = {
                 **svm_prediction,
                 'available': True,
-                'fallback': False,
+                'fallback': bool(self.svm_bootstrap_source),
             }
+            if self.svm_bootstrap_source:
+                models['svm']['reason'] = 'SVM model bootstrapped from NLTK movie_reviews corpus'
         else:
             models['svm'] = {
                 **base,
@@ -397,27 +674,21 @@ class MLService:
                 'reason': 'SVM model file not available in runtime',
             }
 
-        if self.bert_model_loaded and self.bert_pipeline:
-            try:
-                bert_prediction = self._predict_with_bert(text)
-                models['bert'] = {
-                    **bert_prediction,
-                    'available': True,
-                    'fallback': False,
-                }
-            except Exception as exc:
-                models['bert'] = {
-                    **base,
-                    'available': False,
-                    'fallback': True,
-                    'reason': f'BERT inference failed: {exc}',
-                }
-        else:
+        try:
+            bert_prediction = self._predict_with_bert(text)
+            models['bert'] = {
+                **bert_prediction,
+                'available': True,
+                'fallback': not self.bert_model_loaded,
+            }
+            if not self.bert_model_loaded:
+                models['bert']['reason'] = f'Using hosted BERT model: {self.remote_bert_model_id}'
+        except Exception as exc:
             models['bert'] = {
                 **base,
                 'available': False,
                 'fallback': True,
-                'reason': 'BERT runtime dependencies are not installed on server',
+                'reason': f'BERT inference failed: {exc}',
             }
 
         available_models = {

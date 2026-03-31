@@ -46,6 +46,24 @@ class APISmokeTests(APITestCase):
         self.assertIn('models', response.data)
         self.assertIn('logistic_regression', response.data['models'])
 
+    def test_hybrid_bert_vader_prediction_payload(self):
+        response = self.client.post(
+            '/api/predict/',
+            {
+                'review': 'The acting was decent but the pace felt slow and uneven.',
+                'model': 'bert_vader',
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn('sentiment', response.data)
+        self.assertIn(response.data['sentiment'], {'positive', 'negative', 'mixed'})
+        self.assertIn('score', response.data)
+        self.assertIn('keywords', response.data)
+        self.assertIn('components', response.data)
+        self.assertIn('vader', response.data['components'])
+
     def test_batch_endpoint_accepts_multiple_reviews(self):
         payload = {
             'reviews': [

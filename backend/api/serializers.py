@@ -3,7 +3,7 @@
 from rest_framework import serializers
 from .models import Prediction
 
-PREDICT_MODEL_CHOICES = ['logistic_regression', 'svm', 'bert']
+PREDICT_MODEL_CHOICES = ['logistic_regression', 'svm', 'bert', 'bert_vader']
 
 
 class PredictInputSerializer(serializers.Serializer):
