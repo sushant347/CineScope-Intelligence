@@ -7,12 +7,13 @@ Singleton service that loads ML models once and provides prediction methods.
 import os
 import re
 import json
+import time
 import numpy as np
 import joblib
 import logging
 import urllib.error
 import urllib.request
-from collections import Counter
+from collections import Counter, OrderedDict
 from django.conf import settings
 from sklearn.metrics.pairwise import cosine_similarity
 
@@ -58,6 +59,24 @@ SUPPORTED_PREDICTION_MODELS = {'logistic_regression', 'svm', 'bert', 'bert_vader
 DEFAULT_REMOTE_BERT_MODEL = 'distilbert-base-uncased-finetuned-sst-2-english'
 
 
+def _env_bool(name, default=False):
+    return os.environ.get(name, str(default)).strip().lower() in {'1', 'true', 'yes', 'on'}
+
+
+def _env_int(name, default):
+    try:
+        return int(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def _env_float(name, default):
+    try:
+        return float(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
 class MLService:
     """Singleton ML service for sentiment prediction."""
     
@@ -88,10 +107,29 @@ class MLService:
         self.remote_bert_model_id = os.environ.get('HF_BERT_MODEL_ID', DEFAULT_REMOTE_BERT_MODEL).strip()
         self.remote_bert_token = os.environ.get('HF_API_TOKEN', '').strip()
         self.remote_bert_enabled = bool(self.remote_bert_model_id)
+        self.remote_bert_timeout_seconds = max(2.0, _env_float('HF_BERT_TIMEOUT_SECONDS', 8.0))
+        self.remote_bert_retries = max(0, _env_int('HF_BERT_RETRIES', 1))
+        self.remote_bert_wait_for_model = _env_bool('HF_BERT_WAIT_FOR_MODEL', False)
+        self.remote_bert_cache_size = max(32, _env_int('HF_BERT_CACHE_SIZE', 256))
+        self.enable_svm_runtime_bootstrap = _env_bool('ENABLE_SVM_RUNTIME_BOOTSTRAP', False)
+        self._remote_bert_cache = OrderedDict()
         self.stop_words = set(DEFAULT_STOP_WORDS)
         self.lemmatizer = WordNetLemmatizer()
         self.nltk_ready = False
         self._init_nlp_resources()
+
+    def _cached_remote_bert_prediction(self, text):
+        cache_key = text.strip().lower()[:2000]
+        cached = self._remote_bert_cache.get(cache_key)
+        if cached is not None:
+            self._remote_bert_cache.move_to_end(cache_key)
+        return cache_key, cached
+
+    def _store_remote_bert_prediction(self, cache_key, result):
+        self._remote_bert_cache[cache_key] = result
+        self._remote_bert_cache.move_to_end(cache_key)
+        while len(self._remote_bert_cache) > self.remote_bert_cache_size:
+            self._remote_bert_cache.popitem(last=False)
 
     def _ensure_models_loaded(self):
         """Load models lazily to keep startup resilient for non-inference commands."""
@@ -372,11 +410,15 @@ class MLService:
         if not self.remote_bert_enabled:
             raise RuntimeError('Hosted BERT inference is disabled')
 
+        cache_key, cached_result = self._cached_remote_bert_prediction(text)
+        if cached_result is not None:
+            return cached_result
+
         endpoint = f'https://api-inference.huggingface.co/models/{self.remote_bert_model_id}'
         payload = json.dumps({
             'inputs': text[:3000],
             'parameters': {'top_k': None},
-            'options': {'wait_for_model': True},
+            'options': {'wait_for_model': self.remote_bert_wait_for_model},
         }).encode('utf-8')
 
         headers = {'Content-Type': 'application/json'}
@@ -390,14 +432,29 @@ class MLService:
             method='POST',
         )
 
-        try:
-            with urllib.request.urlopen(request, timeout=25) as response:
-                raw_body = response.read().decode('utf-8')
-        except urllib.error.HTTPError as exc:
-            message = exc.read().decode('utf-8', errors='ignore') if hasattr(exc, 'read') else str(exc)
-            raise RuntimeError(f'Hosted BERT HTTP error: {message or exc}') from exc
-        except urllib.error.URLError as exc:
-            raise RuntimeError(f'Hosted BERT connection error: {exc}') from exc
+        raw_body = ''
+        last_error = None
+        for attempt in range(self.remote_bert_retries + 1):
+            try:
+                with urllib.request.urlopen(request, timeout=self.remote_bert_timeout_seconds) as response:
+                    raw_body = response.read().decode('utf-8')
+                    break
+            except urllib.error.HTTPError as exc:
+                message = exc.read().decode('utf-8', errors='ignore') if hasattr(exc, 'read') else str(exc)
+                last_error = RuntimeError(f'Hosted BERT HTTP error: {message or exc}')
+                if attempt < self.remote_bert_retries and exc.code in {408, 429, 500, 502, 503, 504}:
+                    time.sleep(0.6 * (attempt + 1))
+                    continue
+                raise last_error from exc
+            except urllib.error.URLError as exc:
+                last_error = RuntimeError(f'Hosted BERT connection error: {exc}')
+                if attempt < self.remote_bert_retries:
+                    time.sleep(0.6 * (attempt + 1))
+                    continue
+                raise last_error from exc
+
+        if not raw_body and last_error:
+            raise last_error
 
         try:
             data = json.loads(raw_body)
@@ -405,9 +462,17 @@ class MLService:
             raise RuntimeError(f'Hosted BERT response parse error: {exc}') from exc
 
         if isinstance(data, dict) and data.get('error'):
+            estimated_time = data.get('estimated_time')
+            if estimated_time is not None:
+                raise RuntimeError(
+                    f'Hosted BERT model is loading (estimated_time={estimated_time}s). '
+                    'Retry in a few seconds.'
+                )
             raise RuntimeError(str(data['error']))
 
-        return self._normalize_bert_output(data)
+        normalized = self._normalize_bert_output(data)
+        self._store_remote_bert_prediction(cache_key, normalized)
+        return normalized
     
     def _preprocess_text(self, text):
         """Clean and preprocess text."""
@@ -543,7 +608,7 @@ class MLService:
 
         if requested_model == 'svm':
             self._ensure_models_loaded()
-            if not self.svm_model_loaded:
+            if not self.svm_model_loaded and self.enable_svm_runtime_bootstrap:
                 self._bootstrap_svm_model()
 
             svm_vectorizer = self.svm_vectorizer or self.vectorizer
@@ -563,7 +628,10 @@ class MLService:
 
             return {
                 **baseline_response,
-                'reason': 'SVM model is not available in current runtime',
+                'reason': (
+                    'SVM artifact is unavailable in current runtime. '
+                    'Using logistic regression fallback for low-latency inference.'
+                ),
             }
 
         if requested_model == 'bert_vader':
@@ -645,7 +713,7 @@ class MLService:
         base = self.predict(text)
         self._ensure_models_loaded()
         self._load_optional_models()
-        if not self.svm_model_loaded:
+        if not self.svm_model_loaded and self.enable_svm_runtime_bootstrap:
             self._bootstrap_svm_model()
 
         models = {

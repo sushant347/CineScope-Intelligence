@@ -116,6 +116,28 @@ const toCsv = (rows) => {
   return [header.join(','), ...body].join('\n');
 };
 
+const getAnalyzeErrorMessage = (err) => {
+  const detail = err?.response?.data?.detail || err?.response?.data?.message || err?.response?.data?.reason;
+  if (detail) {
+    return detail;
+  }
+
+  if (err?.code === 'ECONNABORTED') {
+    return 'Analysis timed out while the server was processing. Please retry in a few seconds.';
+  }
+
+  const status = err?.response?.status;
+  if (status === 502 || status === 503 || status === 504) {
+    return 'Backend is waking up or temporarily overloaded. Please retry in a few seconds.';
+  }
+
+  if (!err?.response) {
+    return 'Network issue while contacting backend. Check connection and retry.';
+  }
+
+  return 'Analysis failed. Please retry.';
+};
+
 function AnalyzerPage() {
   const [review, setReview] = useState('');
   const [selectedMode, setSelectedMode] = useState('basic');
@@ -171,8 +193,7 @@ function AnalyzerPage() {
 
       setResult({ ...response.data, mode: selectedMode });
     } catch (err) {
-      const details = err.response?.data?.detail || err.response?.data?.message;
-      setError(details || 'Analysis failed. Confirm the backend is running and reachable.');
+      setError(getAnalyzeErrorMessage(err));
     } finally {
       setLoading(false);
     }

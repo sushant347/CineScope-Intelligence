@@ -17,7 +17,7 @@ from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .ml_service import ml_service
+from .ml_service import MOVIE_ASPECTS, ml_service
 from .models import Prediction
 from .serializers import (
     AspectInputSerializer,
@@ -46,6 +46,48 @@ def _save_prediction(user, payload):
         return None
 
 
+def _temporary_inference_error(message='Inference service is temporarily unavailable. Please retry shortly.'):
+    return Response({'detail': message}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
+
+def _build_aspect_mentions(queryset, limit=8):
+    """Aggregate aspect mentions from stored aspect arrays with review-text fallback."""
+    counter = Counter()
+
+    for aspects, review_text in queryset.values_list('aspects', 'review_text')[:1000]:
+        review_aspects = set()
+
+        if isinstance(aspects, list):
+            for item in aspects:
+                if isinstance(item, dict):
+                    aspect_name = str(item.get('aspect', '')).strip().lower()
+                else:
+                    aspect_name = str(item).strip().lower()
+
+                if aspect_name:
+                    review_aspects.add(aspect_name)
+
+        if not review_aspects and review_text:
+            for token in ml_service._tokenize_words(review_text.lower()):
+                normalized = re.sub(r'[^a-z]', '', token)
+                if not normalized:
+                    continue
+
+                lemma = ml_service._safe_lemmatize(normalized)
+                if normalized in MOVIE_ASPECTS:
+                    review_aspects.add(normalized)
+                elif lemma in MOVIE_ASPECTS:
+                    review_aspects.add(lemma)
+
+        for aspect_name in review_aspects:
+            counter[aspect_name] += 1
+
+    return [
+        {'name': aspect_name, 'value': count}
+        for aspect_name, count in counter.most_common(limit)
+    ]
+
+
 class PredictionPagination(PageNumberPagination):
     page_size = 20
     page_size_query_param = 'page_size'
@@ -69,7 +111,11 @@ class PredictView(APIView):
         
         review = serializer.validated_data['review']
         model_name = serializer.validated_data.get('model', 'logistic_regression')
-        result = ml_service.predict_with_model(review, model_name=model_name)
+        try:
+            result = ml_service.predict_with_model(review, model_name=model_name)
+        except Exception:
+            logger.exception("Prediction request failed for model=%s", model_name)
+            return _temporary_inference_error()
         
         prediction = _save_prediction(request.user, {
             'review_text': review,
@@ -103,8 +149,12 @@ class ExplainView(APIView):
         
         review = serializer.validated_data['review']
         num_features = serializer.validated_data.get('num_features', 10)
-        
-        result = ml_service.explain(review, num_features=num_features)
+
+        try:
+            result = ml_service.explain(review, num_features=num_features)
+        except Exception:
+            logger.exception("Explain request failed")
+            return _temporary_inference_error('Explainability service is temporarily unavailable. Please retry shortly.')
         
         prediction = _save_prediction(request.user, {
             'review_text': review,
@@ -138,7 +188,11 @@ class AspectView(APIView):
         serializer.is_valid(raise_exception=True)
         
         review = serializer.validated_data['review']
-        result = ml_service.analyze_aspects(review)
+        try:
+            result = ml_service.analyze_aspects(review)
+        except Exception:
+            logger.exception("Aspect request failed")
+            return _temporary_inference_error('Aspect analysis is temporarily unavailable. Please retry shortly.')
         
         prediction = _save_prediction(request.user, {
             'review_text': review,
@@ -218,7 +272,11 @@ class CompareView(APIView):
         serializer.is_valid(raise_exception=True)
 
         review = serializer.validated_data['review']
-        result = ml_service.compare_models(review)
+        try:
+            result = ml_service.compare_models(review)
+        except Exception:
+            logger.exception("Compare request failed")
+            return _temporary_inference_error('Model comparison is temporarily unavailable. Please retry shortly.')
         winner = result['winner']
         winner_data = result['models'][winner]
 
@@ -311,6 +369,7 @@ class PredictionStatsView(APIView):
         positive = predictions.filter(sentiment='positive').count()
         negative = predictions.filter(sentiment='negative').count()
         avg_confidence = predictions.aggregate(avg=Avg('confidence'))['avg'] or 0
+        aspect_mentions = _build_aspect_mentions(predictions, limit=8)
 
         recent_start = timezone.now() - timedelta(days=30)
         trend_queryset = (
@@ -350,6 +409,7 @@ class PredictionStatsView(APIView):
             'avg_confidence': round(avg_confidence, 4),
             'trend': trend,
             'model_usage': model_usage,
+            'aspect_mentions': aspect_mentions,
         })
 
 
