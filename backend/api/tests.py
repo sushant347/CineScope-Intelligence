@@ -114,6 +114,8 @@ class APISmokeTests(APITestCase):
         stats_response = self.client.get('/api/predictions/stats/')
         self.assertEqual(stats_response.status_code, status.HTTP_200_OK)
         self.assertIn('trend', stats_response.data)
+        self.assertIn('aspect_mentions', stats_response.data)
+        self.assertIsInstance(stats_response.data['aspect_mentions'], list)
 
         tokens_response = self.client.get('/api/predictions/tokens/?limit=10')
         self.assertEqual(tokens_response.status_code, status.HTTP_200_OK)

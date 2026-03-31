@@ -128,6 +128,10 @@ function HistoryPage() {
   }, [predictions]);
 
   const aspectData = useMemo(() => {
+    if (Array.isArray(stats?.aspect_mentions) && stats.aspect_mentions.length > 0) {
+      return stats.aspect_mentions.slice(0, 8);
+    }
+
     const counts = {};
     predictions.forEach((prediction) => {
       (prediction.aspects || []).forEach((aspectItem) => {
@@ -140,7 +144,7 @@ function HistoryPage() {
       .map(([name, value]) => ({ name, value }))
       .sort((a, b) => b.value - a.value)
       .slice(0, 8);
-  }, [predictions]);
+  }, [stats, predictions]);
 
   const totalPages = useMemo(() => {
     const pageSize = Number(filters.page_size || 1);
@@ -354,15 +358,19 @@ function HistoryPage() {
               <article className="history-table-card">
                 <h2>Aspect Mentions</h2>
                 <div className="chart-wrap">
-                  <ResponsiveContainer width="100%" height={280}>
-                    <BarChart data={aspectData}>
-                      <CartesianGrid strokeDasharray="3 3" />
-                      <XAxis dataKey="name" />
-                      <YAxis allowDecimals={false} />
-                      <Tooltip />
-                      <Bar dataKey="value" fill="#0f766e" radius={[8, 8, 0, 0]} />
-                    </BarChart>
-                  </ResponsiveContainer>
+                  {aspectData.length > 0 ? (
+                    <ResponsiveContainer width="100%" height={280}>
+                      <BarChart data={aspectData}>
+                        <CartesianGrid strokeDasharray="3 3" />
+                        <XAxis dataKey="name" />
+                        <YAxis allowDecimals={false} />
+                        <Tooltip />
+                        <Bar dataKey="value" fill="#0f766e" radius={[8, 8, 0, 0]} />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  ) : (
+                    <p className="helper-text">No aspect mentions detected yet. Run aspect mode once or add more movie reviews.</p>
+                  )}
                 </div>
               </article>
 
