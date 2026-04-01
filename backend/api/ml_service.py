@@ -116,6 +116,12 @@ class MLService:
         self.stop_words = set(DEFAULT_STOP_WORDS)
         self.lemmatizer = WordNetLemmatizer()
         self.nltk_ready = False
+        self._nlp_initialized = False
+
+    def _ensure_nlp_loaded(self):
+        if getattr(self, '_nlp_initialized', False):
+            return
+        self._nlp_initialized = True
         self._init_nlp_resources()
 
     def _cached_remote_bert_prediction(self, text):
@@ -180,12 +186,14 @@ class MLService:
             logger.warning("VADER sentiment analyzer unavailable; using neutral fallback score: %s", exc)
 
     def _tokenize_words(self, text):
+        self._ensure_nlp_loaded()
         try:
             return word_tokenize(text)
         except LookupError:
             return text.split()
 
     def _tokenize_sentences(self, text):
+        self._ensure_nlp_loaded()
         try:
             return sent_tokenize(text)
         except LookupError:
@@ -193,12 +201,14 @@ class MLService:
             return [s.strip() for s in re.split(r'[.!?]+', text) if s.strip()]
 
     def _safe_pos_tag(self, tokens):
+        self._ensure_nlp_loaded()
         try:
             return pos_tag(tokens)
         except LookupError:
             return [(token, '') for token in tokens]
 
     def _safe_lemmatize(self, token):
+        self._ensure_nlp_loaded()
         if not self.nltk_ready:
             return token
         try:
@@ -279,6 +289,7 @@ class MLService:
         if self.svm_model_loaded:
             return
 
+        self._ensure_nlp_loaded()
         if not self._ensure_nltk_resource('corpora/movie_reviews', 'movie_reviews'):
             logger.warning("SVM bootstrap skipped because NLTK movie_reviews is unavailable")
             return
@@ -324,6 +335,7 @@ class MLService:
 
     def _score_with_vader(self, text):
         """Return VADER polarity scores with safe fallback."""
+        self._ensure_nlp_loaded()
         if not self.vader_analyzer:
             return {'compound': 0.0, 'pos': 0.0, 'neu': 1.0, 'neg': 0.0}
 
