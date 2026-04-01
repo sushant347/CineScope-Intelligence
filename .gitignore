@@ -20,9 +20,9 @@ backend/staticfiles/
 
 # ML artifacts and datasets
 ml/data/*.csv
-ml/models/*.pkl
-ml/models/*.joblib
-ml/models/bert_sentiment/
+# ml/models/*.pkl (Commented to track pretrained models)
+# ml/models/*.joblib (Commented to track pretrained models)
+# ml/models/bert_sentiment/ (Tracked via Git LFS)
 
 # Node / frontend
 frontend/node_modules/
