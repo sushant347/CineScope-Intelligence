@@ -446,7 +446,11 @@ class MLService:
                     break
             except urllib.error.HTTPError as exc:
                 message = exc.read().decode('utf-8', errors='ignore') if hasattr(exc, 'read') else str(exc)
-                last_error = RuntimeError(f'Hosted BERT HTTP error: {message or exc}')
+                if '<html' in message.lower() or '<!doctype' in message.lower():
+                    clean_message = f"API returned an HTML error page ({exc.code}). This usually means you are unauthorized or need to check your credentials."
+                else:
+                    clean_message = message or str(exc)
+                last_error = RuntimeError(f'Hosted BERT HTTP error: {clean_message}')
                 if attempt < self.remote_bert_retries and exc.code in {408, 429, 500, 502, 503, 504}:
                     time.sleep(0.6 * (attempt + 1))
                     continue
