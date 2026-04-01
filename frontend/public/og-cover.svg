@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" fill="none">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1200" y2="630" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#f7f3eb"/>
+      <stop offset="1" stop-color="#eee7da"/>
+    </linearGradient>
+    <linearGradient id="chip" x1="0" y1="0" x2="280" y2="280" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#0f766e"/>
+      <stop offset="1" stop-color="#b35e16"/>
+    </linearGradient>
+  </defs>
+  <rect width="1200" height="630" fill="url(#bg)"/>
+  <rect x="84" y="72" width="140" height="140" rx="28" fill="url(#chip)"/>
+  <path d="M122 172V111h12l38 32v-32h12v61h-12l-38-32v32h-12Z" fill="#fffdf9"/>
+  <text x="84" y="290" fill="#1f2b33" font-family="Georgia, serif" font-size="64" font-weight="700">CineScope Intelligence</text>
+  <text x="84" y="356" fill="#5d6871" font-family="Arial, sans-serif" font-size="34">Sentiment analysis platform for movie reviews.</text>
+  <text x="84" y="410" fill="#5d6871" font-family="Arial, sans-serif" font-size="28">Django API • React Client • Explainable ML</text>
+</svg>
