@@ -99,22 +99,22 @@ export const getProfile = () => api.get('/auth/profile/');
 
 // Predictions
 export const predictSentiment = (review, model = 'logistic_regression') =>
-  withRetry(() => api.post('/predict/', { review, model }), { retries: 1, delayMs: 1500 });
+  withRetry(() => api.post('/predict/', { review, model }), { retries: 0, delayMs: 1500 });
 
 export const comparePredictions = (review) =>
-  withRetry(() => api.post('/predict/compare/', { review }), { retries: 1, delayMs: 1500 });
+  withRetry(() => api.post('/predict/compare/', { review }), { retries: 0, delayMs: 1500 });
 
 export const predictBatch = (reviews) =>
-  withRetry(() => api.post('/predict/batch/', { reviews }), { retries: 1, delayMs: 1500 });
+  withRetry(() => api.post('/predict/batch/', { reviews }), { retries: 0, delayMs: 1500 });
 
 export const predictWithExplanation = (review, numFeatures = 10) =>
   withRetry(
     () => api.post('/predict/explain/', { review, num_features: numFeatures }),
-    { retries: 1, delayMs: 1500 }
+    { retries: 0, delayMs: 1500 }
   );
 
 export const predictAspects = (review) =>
-  withRetry(() => api.post('/predict/aspect/', { review }), { retries: 1, delayMs: 1500 });
+  withRetry(() => api.post('/predict/aspect/', { review }), { retries: 0, delayMs: 1500 });
 
 // History
 export const getPredictions = (params = {}) =>

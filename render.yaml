@@ -5,7 +5,7 @@ services:
     plan: free
     rootDir: backend
     buildCommand: pip install -r requirements.txt && python manage.py collectstatic --no-input && python manage.py migrate
-    startCommand: gunicorn config.wsgi:application --workers=1 --timeout=90 --graceful-timeout=30 --keep-alive=5 --log-file -
+    startCommand: gunicorn config.wsgi:application --worker-class sync --workers=2 --timeout=120 --graceful-timeout=45 --keep-alive=10 --max-requests=500 --max-requests-jitter=50 --log-file -
     healthCheckPath: /api/health/
     envVars:
       - key: PYTHON_VERSION
@@ -27,11 +27,19 @@ services:
       - key: HF_API_TOKEN
         sync: false
       - key: HF_BERT_TIMEOUT_SECONDS
-        value: "8"
+        value: "25"
       - key: HF_BERT_RETRIES
         value: "1"
       - key: HF_BERT_WAIT_FOR_MODEL
-        value: "False"
+        value: "True"
+      - key: MAX_VECTOR_TEXT_CHARS
+        value: "4000"
+      - key: MAX_BERT_TEXT_CHARS
+        value: "1200"
+      - key: PREPROCESS_CACHE_SIZE
+        value: "1024"
+      - key: VECTOR_PREDICTION_CACHE_SIZE
+        value: "1024"
       - key: ENABLE_SVM_RUNTIME_BOOTSTRAP
         value: "False"
       - key: DJANGO_SECURE_SSL_REDIRECT

@@ -10,13 +10,15 @@ psycopg[binary]==3.2.9
 joblib==1.4.2
 numpy==1.26.4
 pandas==2.2.2
-scikit-learn==1.6.1
+scikit-learn==1.5.1
 nltk==3.9.1
 lime==0.2.0.1
 gunicorn==22.0.0
 python-dotenv==1.0.1
 
-# Text Classification (BERT)
---extra-index-url https://download.pytorch.org/whl/cpu
-torch>=2.2.0
-transformers>=4.38.0
+# Text Classification (BERT) - OPTIONAL for local inference only.
+# On Render the HF remote inference API is used (HF_BERT_MODEL_ID env var).
+# Uncomment below ONLY if you need local bert_sentiment model loading.
+# --extra-index-url https://download.pytorch.org/whl/cpu
+# torch>=2.2.0
+# transformers>=4.38.0

@@ -84,7 +84,8 @@ DATABASE_URL = os.environ.get('DATABASE_URL')
 if DATABASE_URL:
     DATABASES['default'] = dj_database_url.config(
         default=DATABASE_URL,
-        conn_max_age=600,
+        conn_max_age=60,        # shorter pool lifetime on free-tier Neon
+        conn_health_checks=True,  # re-validate stale connections after Render sleep
         ssl_require=not DEBUG,
     )
 

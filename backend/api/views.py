@@ -679,10 +679,14 @@ class HealthCheckView(APIView):
     throttle_classes = []
 
     def get(self, request):
-        ml_service._ensure_models_loaded()
-        return Response({
+        resp = Response({
             'status': 'ok',
             'service': 'cinescope-api',
             'timestamp': timezone.now().isoformat(),
-            'model_mode': 'trained' if ml_service.model_loaded else 'demo',
+            'model_mode': 'trained' if ml_service.model_loaded else 'lazy',
+            'models_loaded': bool(
+                ml_service.model_loaded or ml_service.svm_model_loaded or ml_service.bert_model_loaded
+            ),
         }, status=status.HTTP_200_OK)
+        resp['Cache-Control'] = 'public, max-age=10'
+        return resp

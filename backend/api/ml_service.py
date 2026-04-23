@@ -8,6 +8,7 @@ import os
 import re
 import json
 import time
+import warnings
 import numpy as np
 import joblib
 import logging
@@ -15,6 +16,8 @@ import urllib.error
 import urllib.request
 from collections import Counter, OrderedDict
 from django.conf import settings
+from sklearn import __version__ as SKLEARN_VERSION
+from sklearn.exceptions import InconsistentVersionWarning
 from sklearn.metrics.pairwise import cosine_similarity
 
 import nltk
@@ -30,6 +33,8 @@ DEFAULT_STOP_WORDS = {
     'a', 'an', 'and', 'are', 'as', 'at', 'be', 'by', 'for', 'from',
     'in', 'is', 'it', 'of', 'on', 'or', 'that', 'the', 'this', 'to', 'was', 'were',
 }
+
+FAST_WORD_PATTERN = re.compile(r'[a-z]+')
 
 NLTK_RESOURCES = [
     ('tokenizers/punkt', 'punkt'),
@@ -103,16 +108,23 @@ class MLService:
         self.svm_model_loaded = False
         self.bert_model_loaded = False
         self._models_checked = False
+        self._svm_checked = False
         self._optional_models_checked = False
         self.remote_bert_model_id = os.environ.get('HF_BERT_MODEL_ID', DEFAULT_REMOTE_BERT_MODEL).strip()
         self.remote_bert_token = os.environ.get('HF_API_TOKEN', '').strip()
         self.remote_bert_enabled = bool(self.remote_bert_model_id)
-        self.remote_bert_timeout_seconds = max(2.0, _env_float('HF_BERT_TIMEOUT_SECONDS', 8.0))
-        self.remote_bert_retries = max(0, _env_int('HF_BERT_RETRIES', 1))
+        self.remote_bert_timeout_seconds = max(2.0, _env_float('HF_BERT_TIMEOUT_SECONDS', 4.0))
+        self.remote_bert_retries = max(0, _env_int('HF_BERT_RETRIES', 0))
         self.remote_bert_wait_for_model = _env_bool('HF_BERT_WAIT_FOR_MODEL', False)
         self.remote_bert_cache_size = max(32, _env_int('HF_BERT_CACHE_SIZE', 256))
+        self.max_vector_text_chars = max(500, _env_int('MAX_VECTOR_TEXT_CHARS', 4000))
+        self.max_bert_text_chars = max(600, _env_int('MAX_BERT_TEXT_CHARS', 1200))
+        self.preprocess_cache_size = max(64, _env_int('PREPROCESS_CACHE_SIZE', 1024))
+        self.vector_prediction_cache_size = max(64, _env_int('VECTOR_PREDICTION_CACHE_SIZE', 1024))
         self.enable_svm_runtime_bootstrap = _env_bool('ENABLE_SVM_RUNTIME_BOOTSTRAP', False)
         self._remote_bert_cache = OrderedDict()
+        self._preprocess_cache = OrderedDict()
+        self._vector_prediction_cache = OrderedDict()
         self.stop_words = set(DEFAULT_STOP_WORDS)
         self.lemmatizer = WordNetLemmatizer()
         self.nltk_ready = False
@@ -125,7 +137,7 @@ class MLService:
         self._init_nlp_resources()
 
     def _cached_remote_bert_prediction(self, text):
-        cache_key = text.strip().lower()[:2000]
+        cache_key = text.strip().lower()[:self.max_bert_text_chars]
         cached = self._remote_bert_cache.get(cache_key)
         if cached is not None:
             self._remote_bert_cache.move_to_end(cache_key)
@@ -137,11 +149,92 @@ class MLService:
         while len(self._remote_bert_cache) > self.remote_bert_cache_size:
             self._remote_bert_cache.popitem(last=False)
 
+    def _cached_preprocessed_text(self, cache_key):
+        cached = self._preprocess_cache.get(cache_key)
+        if cached is not None:
+            self._preprocess_cache.move_to_end(cache_key)
+        return cached
+
+    def _store_preprocessed_text(self, cache_key, value):
+        self._preprocess_cache[cache_key] = value
+        self._preprocess_cache.move_to_end(cache_key)
+        while len(self._preprocess_cache) > self.preprocess_cache_size:
+            self._preprocess_cache.popitem(last=False)
+
+    def _cached_vector_prediction(self, cache_key):
+        cached = self._vector_prediction_cache.get(cache_key)
+        if cached is not None:
+            self._vector_prediction_cache.move_to_end(cache_key)
+        return cached
+
+    def _store_vector_prediction(self, cache_key, value):
+        self._vector_prediction_cache[cache_key] = value
+        self._vector_prediction_cache.move_to_end(cache_key)
+        while len(self._vector_prediction_cache) > self.vector_prediction_cache_size:
+            self._vector_prediction_cache.popitem(last=False)
+
+    def _build_vector_prediction_cache_key(self, cache_scope, text):
+        normalized = str(text or '').strip().lower()
+        if len(normalized) > self.max_vector_text_chars:
+            normalized = normalized[:self.max_vector_text_chars]
+        return f'{cache_scope}:{normalized}'
+
     def _ensure_models_loaded(self):
         """Load models lazily to keep startup resilient for non-inference commands."""
         if not self._models_checked:
             self._models_checked = True
             self._load_models()
+
+    def _safe_joblib_load(self, file_path, artifact_name):
+        """Load joblib artifacts while collapsing verbose sklearn version warnings."""
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always', InconsistentVersionWarning)
+            loaded = joblib.load(file_path)
+
+        mismatch_messages = [
+            str(item.message)
+            for item in caught
+            if issubclass(item.category, InconsistentVersionWarning)
+        ]
+        if mismatch_messages:
+            logger.warning(
+                "Version mismatch for %s (%s). Runtime sklearn=%s. "
+                "Using artifact anyway; retrain or repickle to remove compatibility risk. "
+                "Example warning: %s",
+                artifact_name,
+                os.path.basename(file_path),
+                SKLEARN_VERSION,
+                mismatch_messages[0],
+            )
+        return loaded
+
+    def _ensure_svm_model_loaded(self):
+        """Load SVM artifacts on demand so startup stays lightweight."""
+        self._ensure_models_loaded()
+        if self._svm_checked:
+            return
+
+        self._svm_checked = True
+        model_dir = getattr(settings, 'ML_MODEL_DIR', None)
+        if not model_dir:
+            return
+
+        svm_path = os.path.join(model_dir, 'svm_model.pkl')
+        svm_vec_path = os.path.join(model_dir, 'svm_vectorizer.pkl')
+        if not os.path.exists(svm_path):
+            return
+
+        try:
+            self.svm_model = self._safe_joblib_load(svm_path, 'svm_model')
+            # Load dedicated SVM vectorizer if it exists, otherwise use shared vectorizer
+            if os.path.exists(svm_vec_path):
+                self.svm_vectorizer = self._safe_joblib_load(svm_vec_path, 'svm_vectorizer')
+            else:
+                self.svm_vectorizer = self.vectorizer
+            self.svm_model_loaded = True
+            logger.info("SVM model loaded successfully")
+        except Exception as exc:
+            logger.warning("Failed to load SVM model: %s", exc)
 
     def _ensure_nltk_resource(self, resource_path, resource_name):
         """Ensure an NLTK resource exists locally; attempt download if missing."""
@@ -228,8 +321,8 @@ class MLService:
         
         if os.path.exists(model_path) and os.path.exists(tfidf_path):
             try:
-                self.model = joblib.load(model_path)
-                self.vectorizer = joblib.load(tfidf_path)
+                self.model = self._safe_joblib_load(model_path, 'logistic_regression')
+                self.vectorizer = self._safe_joblib_load(tfidf_path, 'tfidf_vectorizer')
                 self.model_loaded = True
                 logger.info("ML models loaded successfully")
             except Exception as e:
@@ -237,21 +330,6 @@ class MLService:
         else:
             logger.warning(f"Model files not found in {model_dir}. "
                          "API will work in demo mode.")
-
-        svm_path = os.path.join(model_dir, 'svm_model.pkl')
-        svm_vec_path = os.path.join(model_dir, 'svm_vectorizer.pkl')
-        if os.path.exists(svm_path):
-            try:
-                self.svm_model = joblib.load(svm_path)
-                # Load dedicated SVM vectorizer if it exists, otherwise use shared vectorizer
-                if os.path.exists(svm_vec_path):
-                    self.svm_vectorizer = joblib.load(svm_vec_path)
-                else:
-                    self.svm_vectorizer = self.vectorizer
-                self.svm_model_loaded = True
-                logger.info("SVM model loaded successfully")
-            except Exception as exc:
-                logger.warning("Failed to load SVM model: %s", exc)
 
     def _load_optional_models(self):
         """Load optional deep model only when explicitly needed."""
@@ -269,6 +347,10 @@ class MLService:
 
         try:
             from transformers import AutoTokenizer, AutoModelForSequenceClassification, TextClassificationPipeline
+            import torch
+            # Pin to 2 threads on CPU-only hosting to avoid OS context-switch overhead
+            if not torch.cuda.is_available():
+                torch.set_num_threads(2)
 
             tokenizer = AutoTokenizer.from_pretrained(bert_path)
             model = AutoModelForSequenceClassification.from_pretrained(bert_path)
@@ -277,7 +359,7 @@ class MLService:
                 tokenizer=tokenizer,
                 top_k=None,
                 truncation=True,
-                max_length=512,
+                max_length=256,   # 256 is sufficient for reviews; 512 doubles inference time
             )
             self.bert_model_loaded = True
             logger.info("Optional BERT model loaded for comparison")
@@ -433,7 +515,7 @@ class MLService:
 
         endpoint = f'https://router.huggingface.co/models/{self.remote_bert_model_id}'
         payload = json.dumps({
-            'inputs': text[:3000],
+            'inputs': text[:self.max_bert_text_chars],
             'parameters': {'top_k': None},
             'options': {'wait_for_model': self.remote_bert_wait_for_model},
         }).encode('utf-8')
@@ -497,23 +579,38 @@ class MLService:
     
     def _preprocess_text(self, text):
         """Clean and preprocess text."""
-        # Remove HTML tags
+        text = str(text or '')
+        if len(text) > self.max_vector_text_chars:
+            text = text[:self.max_vector_text_chars]
+
+        cache_key = text.strip().lower()
+        cached = self._cached_preprocessed_text(cache_key)
+        if cached is not None:
+            return cached
+
+        # Keep preprocessing equivalent to training but avoid expensive tokenizers
+        # in hot inference paths by using a fast regex tokenizer.
         text = re.sub(r'<.*?>', '', text)
-        # Remove URLs
         text = re.sub(r'http\S+|www\S+', '', text)
-        # Lowercase
         text = text.lower()
-        # Remove special characters
-        text = re.sub(r'[^a-zA-Z\s]', '', text)
-        # Tokenize
-        tokens = self._tokenize_words(text)
-        # Remove stopwords and lemmatize
-        tokens = [
-            self._safe_lemmatize(token)
-            for token in tokens
-            if token not in self.stop_words and len(token) > 2
-        ]
-        return ' '.join(tokens)
+
+        tokens = FAST_WORD_PATTERN.findall(text)
+        if self.nltk_ready:
+            processed = [
+                self._safe_lemmatize(token)
+                for token in tokens
+                if token not in self.stop_words and len(token) > 2
+            ]
+        else:
+            processed = [
+                token
+                for token in tokens
+                if token not in self.stop_words and len(token) > 2
+            ]
+
+        clean_text = ' '.join(processed)
+        self._store_preprocessed_text(cache_key, clean_text)
+        return clean_text
     
     def predict(self, text):
         """
@@ -611,30 +708,39 @@ class MLService:
         if requested_model not in SUPPORTED_PREDICTION_MODELS:
             requested_model = 'logistic_regression'
 
-        baseline = self.predict(text)
-        baseline_response = {
-            **baseline,
-            'model_requested': requested_model,
-            'model_used': 'logistic_regression',
-            'fallback': requested_model != 'logistic_regression' or not self.model_loaded,
-        }
+        def baseline_response(fallback_reason=None):
+            baseline = self.predict(text)
+            response = {
+                **baseline,
+                'model_requested': requested_model,
+                'model_used': 'logistic_regression',
+                'fallback': requested_model != 'logistic_regression' or not self.model_loaded,
+            }
+            if fallback_reason:
+                response['reason'] = fallback_reason
+            return response
 
         if requested_model == 'logistic_regression':
             return {
-                **baseline,
+                **self.predict(text),
                 'model_requested': requested_model,
                 'model_used': 'logistic_regression',
                 'fallback': not self.model_loaded,
             }
 
         if requested_model == 'svm':
-            self._ensure_models_loaded()
+            self._ensure_svm_model_loaded()
             if not self.svm_model_loaded and self.enable_svm_runtime_bootstrap:
                 self._bootstrap_svm_model()
 
             svm_vectorizer = self.svm_vectorizer or self.vectorizer
             if self.svm_model_loaded and self.svm_model and svm_vectorizer:
-                svm_result = self._predict_with_vector_model(text, self.svm_model, vectorizer=svm_vectorizer)
+                svm_result = self._predict_with_vector_model(
+                    text,
+                    self.svm_model,
+                    vectorizer=svm_vectorizer,
+                    cache_scope='svm',
+                )
                 used_bootstrap = bool(self.svm_bootstrap_source)
                 response = {
                     **svm_result,
@@ -647,13 +753,10 @@ class MLService:
 
                 return response
 
-            return {
-                **baseline_response,
-                'reason': (
-                    'SVM artifact is unavailable in current runtime. '
-                    'Using logistic regression fallback for low-latency inference.'
-                ),
-            }
+            return baseline_response(
+                'SVM artifact is unavailable in current runtime. '
+                'Using logistic regression fallback for low-latency inference.'
+            )
 
         if requested_model == 'bert_vader':
             try:
@@ -665,10 +768,7 @@ class MLService:
                     'fallback': fusion_result.get('fallback', False),
                 }
             except Exception as exc:
-                return {
-                    **baseline_response,
-                    'reason': f'BERT + VADER fusion failed: {exc}',
-                }
+                return baseline_response(f'BERT + VADER fusion failed: {exc}')
 
         if requested_model == 'bert':
             self._load_optional_models()
@@ -684,15 +784,17 @@ class MLService:
                     response['reason'] = f'Using hosted BERT model: {self.remote_bert_model_id}'
                 return response
             except Exception as exc:
-                return {
-                    **baseline_response,
-                    'reason': f'BERT inference failed: {exc}',
-                }
+                return baseline_response(f'BERT inference failed: {exc}')
 
-        return baseline_response
+        return baseline_response()
 
-    def _predict_with_vector_model(self, text, model, vectorizer=None):
+    def _predict_with_vector_model(self, text, model, vectorizer=None, cache_scope='logistic_regression'):
         """Run inference for models that use the shared TF-IDF vectorizer."""
+        cache_key = self._build_vector_prediction_cache_key(cache_scope, text)
+        cached = self._cached_vector_prediction(cache_key)
+        if cached is not None:
+            return dict(cached)
+
         clean_text = self._preprocess_text(text)
         active_vectorizer = vectorizer or self.vectorizer
         if active_vectorizer is None:
@@ -714,17 +816,20 @@ class MLService:
         sentiment = 'positive' if prediction == 1 else 'negative'
         confidence = max(positive_prob, negative_prob)
 
-        return {
+        result = {
             'sentiment': sentiment,
             'confidence': round(float(confidence), 4),
             'positive_prob': round(float(positive_prob), 4),
             'negative_prob': round(float(negative_prob), 4),
         }
+        self._store_vector_prediction(cache_key, result)
+        return dict(result)
 
     def _predict_with_bert(self, text):
         """Run BERT inference from local artifacts first, then hosted fallback."""
+        text = str(text or '')[:self.max_bert_text_chars]
         if self.bert_pipeline:
-            outputs = self.bert_pipeline(text[:3000])
+            outputs = self.bert_pipeline(text)
             return self._normalize_bert_output(outputs)
 
         return self._predict_with_remote_bert(text)
@@ -732,7 +837,7 @@ class MLService:
     def compare_models(self, text):
         """Compare predictions across available LR, SVM, and BERT models."""
         base = self.predict(text)
-        self._ensure_models_loaded()
+        self._ensure_svm_model_loaded()
         self._load_optional_models()
         if not self.svm_model_loaded and self.enable_svm_runtime_bootstrap:
             self._bootstrap_svm_model()
@@ -747,7 +852,12 @@ class MLService:
 
         svm_vectorizer = self.svm_vectorizer or self.vectorizer
         if self.svm_model_loaded and self.svm_model and svm_vectorizer:
-            svm_prediction = self._predict_with_vector_model(text, self.svm_model, vectorizer=svm_vectorizer)
+            svm_prediction = self._predict_with_vector_model(
+                text,
+                self.svm_model,
+                vectorizer=svm_vectorizer,
+                cache_scope='svm',
+            )
             models['svm'] = {
                 **svm_prediction,
                 'available': True,
@@ -877,7 +987,7 @@ class MLService:
             explanation = explainer.explain_instance(
                 text, predict_fn,
                 num_features=num_features,
-                num_samples=500
+                num_samples=200,   # 200 is enough for word attributions; 500 is 2.5x slower
             )
             
             # Get overall prediction

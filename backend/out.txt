@@ -1,0 +1,3 @@
+Local BERT model loaded? False
+Output for 'I love this movie!': {'sentiment': 'positive', 'confidence': 0.8073, 'positive_prob': 0.8073, 'negative_prob': 0.1927, 'model_requested': 'bert', 'model_used': 'bert', 'fallback': False}
+Output for 'I hate this terrible movie.': {'sentiment': 'negative', 'confidence': 0.6536, 'positive_prob': 0.3464, 'negative_prob': 0.6536, 'model_requested': 'bert', 'model_used': 'bert', 'fallback': False}
